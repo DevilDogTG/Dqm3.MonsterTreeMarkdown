@@ -158,6 +158,31 @@ function Sanitize-Id {
     ($Name.ToLowerInvariant() -replace '[^a-z0-9]+', '-').Trim('-')
 }
 
+
+$FamilyRankDefaults = @{
+    'beast-family'    = 'Any'
+    'demon-family'    = 'Any'
+    'dragon-family'   = 'Any'
+    'material-family' = 'Any'
+    'nature-family'   = 'Any'
+    'slime-family'    = 'Any'
+    'undead-family'   = 'Any'
+    'family'          = 'Any'
+}
+
+function Get-FamilyRank {
+    param([string]$Name)
+
+    if (-not $Name) { return '' }
+
+    $normalized = Sanitize-Id $Name
+    if ($FamilyRankDefaults.ContainsKey($normalized)) {
+        return $FamilyRankDefaults[$normalized]
+    }
+
+    return ''
+}
+
 function Get-FamilyImagePath {
     param([string]$Name)
 
@@ -193,6 +218,10 @@ function New-SynthesisNode {
 
     $name = if ($LookupNode) { $LookupNode.name } else { $FallbackName }
     $rank = if ($LookupNode) { $LookupNode.rank } else { '' }
+    if (-not $rank) {
+        $familyRank = Get-FamilyRank -Name $name
+        if ($familyRank) { $rank = $familyRank }
+    }
     $imageUrl = if ($LookupNode) { $LookupNode.imageUrl } else { '' }
     $monsterId = if ($LookupNode) { $LookupNode.monsterId } else { $null }
     $lookupId = if ($LookupNode) { $LookupNode.id } else { $null }
@@ -388,7 +417,7 @@ function Build-Mermaid {
     $null = $sb.AppendLine('graph LR')
     $null = $sb.AppendLine('    classDef current stroke:#90CAF9,fill:#1565C0;')
     $null = $sb.AppendLine('    classDef scout stroke:#FFB74D,fill:#E65100;')
-    $null = $sb.AppendLine('    classDef done stroke:#81C784,fill:#2E7D32;')
+    $null = $sb.AppendLine('    classDef duplicated stroke:#81C784,fill:#2E7D32;')
 
     $queue = [System.Collections.Generic.Queue[object]]::new()
     $visited = [System.Collections.Generic.HashSet[string]]::new()
