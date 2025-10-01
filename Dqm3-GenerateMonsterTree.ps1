@@ -158,59 +158,130 @@ function Sanitize-Id {
     ($Name.ToLowerInvariant() -replace '[^a-z0-9]+', '-').Trim('-')
 }
 
+function Get-FamilyImagePath {
+    param([string]$Name)
+
+    if (-not $Name) { return $null }
+
+    $normalized = Sanitize-Id $Name
+    $families = @(
+        'beast-family',
+        'demon-family',
+        'dragon-family',
+        'material-family',
+        'nature-family',
+        'slime-family',
+        'undead-family'
+    )
+
+    if ($families -contains $normalized) {
+        return "images/$normalized.jpg"
+    }
+
+    return $null
+}
+
+function New-SynthesisNode {
+    param(
+        $LookupNode,
+        [string]$FallbackName,
+        [object[]]$Children,
+        [string]$Source,
+        [hashtable]$DuplicateCounts,
+        [switch]$IsDuplicate
+    )
+
+    $name = if ($LookupNode) { $LookupNode.name } else { $FallbackName }
+    $rank = if ($LookupNode) { $LookupNode.rank } else { '' }
+    $imageUrl = if ($LookupNode) { $LookupNode.imageUrl } else { '' }
+    $monsterId = if ($LookupNode) { $LookupNode.monsterId } else { $null }
+    $lookupId = if ($LookupNode) { $LookupNode.id } else { $null }
+    $baseKey = Sanitize-Id $name
+    if (-not $baseKey) {
+        $fallbackId = if ($lookupId) { [string]$lookupId } elseif ($monsterId) { [string]$monsterId } else { $null }
+        $baseKey = if ($fallbackId) { Sanitize-Id $fallbackId } else { 'monster' }
+    }
+
+    if (-not $DuplicateCounts.ContainsKey($baseKey)) {
+        $DuplicateCounts[$baseKey] = 0
+    }
+
+    $duplicateIndex = 0
+    $nodeKey = $baseKey
+    $nodeChildren = $Children
+    if ($IsDuplicate) {
+        $DuplicateCounts[$baseKey] = [int]$DuplicateCounts[$baseKey] + 1
+        $duplicateIndex = $DuplicateCounts[$baseKey]
+        $nodeKey = "$baseKey-ex$duplicateIndex"
+        $nodeChildren = @()
+    }
+
+    $localImage = Get-FamilyImagePath -Name $name
+    $effectiveSource = if ($Source) { $Source } else { 'Leaf' }
+
+    return [pscustomobject]@{
+        Name = $name
+        Rank = $rank
+        ImageUrl = $imageUrl
+        LocalImage = $localImage
+        Children = $nodeChildren
+        Source = $effectiveSource
+        MonsterId = $baseKey
+        NodeKey = $nodeKey
+        BaseNodeKey = $baseKey
+        DuplicateIndex = $duplicateIndex
+        IsDuplicate = [bool]$IsDuplicate
+    }
+}
+
+
 function Build-SynthesisTree {
     param(
         [hashtable]$Lookup,
         [string]$Name,
-        [System.Collections.Generic.HashSet[string]]$Visited
+        [System.Collections.Generic.HashSet[string]]$Visited,
+        [hashtable]$DuplicateCounts
     )
 
-    if ($Visited.Contains($Name)) { return $null }
-    $Visited.Add($Name) | Out-Null
-
     $node = if ($Lookup.ContainsKey($Name)) { $Lookup[$Name] } else { $null }
-    if (-not $node) {
-        return [pscustomobject]@{
-            Name = $Name
-            Rank = ''
-            ImageUrl = ''
-            Children = @()
-            Source = 'Leaf'
+
+    $childrenNames = @()
+    $source = 'Leaf'
+    if ($node) {
+        $source = 'Normal'
+        if ($node.specialSynthesis.parentMonster1.name -or $node.specialSynthesis.parentMonster2.name) {
+            $source = 'Special'
+            $childrenNames = @($node.specialSynthesis.parentMonster1.name, $node.specialSynthesis.parentMonster2.name)
+        } elseif ($node.quadrupleSynthesis.parentMonster1.name -or $node.quadrupleSynthesis.parentMonster2.name -or $node.quadrupleSynthesis.parentMonster3.name -or $node.quadrupleSynthesis.parentMonster4.name) {
+            $source = 'Quadruple'
+            $childrenNames = @(
+                $node.quadrupleSynthesis.parentMonster1.name,
+                $node.quadrupleSynthesis.parentMonster2.name,
+                $node.quadrupleSynthesis.parentMonster3.name,
+                $node.quadrupleSynthesis.parentMonster4.name
+            )
+        } elseif ($node.synthesis.parentMonster1.name -or $node.synthesis.parentMonster2.name) {
+            $source = 'Normal'
+            $childrenNames = @($node.synthesis.parentMonster1.name, $node.synthesis.parentMonster2.name)
         }
     }
 
-    $childrenNames = @()
-    $source = 'Normal'
-    if ($node.specialSynthesis.parentMonster1.name -or $node.specialSynthesis.parentMonster2.name) {
-        $source = 'Special'
-        $childrenNames = @($node.specialSynthesis.parentMonster1.name, $node.specialSynthesis.parentMonster2.name)
-    } elseif ($node.quadrupleSynthesis.parentMonster1.name -or $node.quadrupleSynthesis.parentMonster2.name -or $node.quadrupleSynthesis.parentMonster3.name -or $node.quadrupleSynthesis.parentMonster4.name) {
-        $source = 'Quadruple'
-        $childrenNames = @(
-            $node.quadrupleSynthesis.parentMonster1.name,
-            $node.quadrupleSynthesis.parentMonster2.name,
-            $node.quadrupleSynthesis.parentMonster3.name,
-            $node.quadrupleSynthesis.parentMonster4.name
-        )
-    } elseif ($node.synthesis.parentMonster1.name -or $node.synthesis.parentMonster2.name) {
-        $source = 'Normal'
-        $childrenNames = @($node.synthesis.parentMonster1.name, $node.synthesis.parentMonster2.name)
+    if ($Visited.Contains($Name)) {
+        return New-SynthesisNode -LookupNode $node -FallbackName $Name -Children @() -Source $source -DuplicateCounts $DuplicateCounts -IsDuplicate
     }
+
+    $Visited.Add($Name) | Out-Null
 
     $children = @()
     foreach ($childName in $childrenNames | Where-Object { $_ -and $_.Trim() -ne '' }) {
-        $childTree = Build-SynthesisTree -Lookup $Lookup -Name $childName.Trim() -Visited $Visited
+        $childTree = Build-SynthesisTree -Lookup $Lookup -Name $childName.Trim() -Visited $Visited -DuplicateCounts $DuplicateCounts
         if ($childTree) { $children += $childTree }
     }
 
-    return [pscustomobject]@{
-        Name = $node.name
-        Rank = $node.rank
-        ImageUrl = $node.imageUrl
-        Children = $children
-        Source = $source
-    }
+    return New-SynthesisNode -LookupNode $node -FallbackName $Name -Children $children -Source $source -DuplicateCounts $DuplicateCounts
 }
+
+
 
 function Flatten-Nodes {
     param($Root)
@@ -220,12 +291,14 @@ function Flatten-Nodes {
     $seen = [System.Collections.Generic.HashSet[string]]::new()
     while ($queue.Count -gt 0) {
         $node = $queue.Dequeue()
-        if (-not $seen.Add($node.Name)) { continue }
+        if (-not $seen.Add($node.NodeKey)) { continue }
         $list.Add($node)
         foreach ($child in $node.Children) { $queue.Enqueue($child) }
     }
     return $list
 }
+
+
 
 function Ensure-Directory {
     param([string]$Path)
@@ -327,31 +400,27 @@ function Build-Mermaid {
 
     while ($queue.Count -gt 0) {
         $node = $queue.Dequeue()
-        if (-not $visited.Add($node.Name)) { continue }
+        if (-not $visited.Add($node.NodeKey)) { continue }
 
-        $nodeId = Sanitize-Id $node.Name
+        $nodeId = Sanitize-Id $node.NodeKey
         $label = "$($node.Name) ($($node.Rank))"
-        $img = if ($ImageMap.ContainsKey($node.Name)) { "<img src=`"$($ImageMap[$node.Name])`" />" } else { '' }
-        # $style = if ($node.Children.Count -eq 0) { 'leaf' } elseif ($node.Source -eq 'Special' -or $node.Source -eq 'Quadruple') { 'special' } else { 'normal' }
+        $img = if ($ImageMap.ContainsKey($node.NodeKey)) { "<img src=`"$($ImageMap[$node.NodeKey])`" />" } else { '' }
 
         $nodeData[$nodeId] = [pscustomobject]@{
             Label = $label
             Image = $img
-            # Style = $style
         }
 
         foreach ($child in $node.Children) {
             $queue.Enqueue($child)
 
-            $childId = Sanitize-Id $child.Name
+            $childId = Sanitize-Id $child.NodeKey
             $childLabel = "$($child.Name) ($($child.Rank))"
-            $childImg = if ($ImageMap.ContainsKey($child.Name)) { "<img src=`"$($ImageMap[$child.Name])`" />" } else { '' }
-            # $childStyle = if ($child.Children.Count -eq 0) { 'leaf' } elseif ($child.Source -eq 'Special' -or $child.Source -eq 'Quadruple') { 'special' } else { 'normal' }
+            $childImg = if ($ImageMap.ContainsKey($child.NodeKey)) { "<img src=`"$($ImageMap[$child.NodeKey])`" />" } else { '' }
 
             $nodeData[$childId] = [pscustomobject]@{
                 Label = $childLabel
                 Image = $childImg
-                # Style = $childStyle
             }
 
             $edgeKey = "$childId|$nodeId"
@@ -367,13 +436,6 @@ function Build-Mermaid {
         $null = $sb.AppendLine(('    {0}["{1}"{2}]' -f $nodeId, $nodeEntry.Label, $nodeEntry.Image))
     }
 
-    # foreach ($nodeId in $sortedNodeIds) {
-    #     $nodeEntry = $nodeData[$nodeId]
-    #     $style = $nodeEntry.Style
-    #     if ($style -eq 'special') { continue }
-    #     $null = $sb.AppendLine("    class $nodeId $style")
-    # }
-
     $sortedEdges = $edgeTuples | Sort-Object -Property From, To
     foreach ($edge in $sortedEdges) {
         $null = $sb.AppendLine("    $($edge.To) --- $($edge.From)")
@@ -382,6 +444,7 @@ function Build-Mermaid {
     $null = $sb.AppendLine('```')
     return $sb.ToString()
 }
+
 
 # Load mapping dataset and lookup monster
 $mapping = Get-MappingDataset
@@ -401,18 +464,47 @@ $doc = Get-HtmlDocument -Uri $detailUrl
 $overview = Get-MonsterOverview -Doc $doc
 
 $visited = [System.Collections.Generic.HashSet[string]]::new()
-$root = Build-SynthesisTree -Lookup $lookup -Name $MonsterName -Visited $visited
+$duplicateCounts = @{}
+$root = Build-SynthesisTree -Lookup $lookup -Name $MonsterName -Visited $visited -DuplicateCounts $duplicateCounts
 $nodes = Flatten-Nodes -Root $root
 
-$imagesDir = Join-Path -Path (Resolve-Path $OutputDirectory) -ChildPath 'images'
+Ensure-Directory -Path $OutputDirectory
+$outputRoot = (Resolve-Path -Path $OutputDirectory).Path
+
+$imagesDir = Join-Path -Path $outputRoot -ChildPath 'images'
 Ensure-Directory -Path $imagesDir
+
+$assetsImagesDir = Join-Path -Path $PSScriptRoot -ChildPath 'assets/images'
+if (Test-Path $assetsImagesDir) {
+    # Pre-seed the output directory with bundled images
+    Copy-Item -Path (Join-Path $assetsImagesDir '*') -Destination $imagesDir -Recurse -Force
+}
+
 $imageMap = @{}
+$baseImageCache = @{}
 foreach ($node in $nodes) {
+    $nodeKey = $node.NodeKey
+    $baseKey = $node.BaseNodeKey
+
+    if ($node.LocalImage) {
+        if (-not $baseImageCache.ContainsKey($baseKey)) { $baseImageCache[$baseKey] = $node.LocalImage }
+        $imageMap[$nodeKey] = $baseImageCache[$baseKey]
+        continue
+    }
+
+    if ($baseImageCache.ContainsKey($baseKey)) {
+        $imageMap[$nodeKey] = $baseImageCache[$baseKey]
+        continue
+    }
+
     if (-not $node.ImageUrl) { continue }
-    $fileName = "$(Sanitize-Id $node.Name).jpg"
+
+    $fileName = "$(Sanitize-Id $baseKey).jpg"
     $targetPath = Join-Path $imagesDir $fileName
     Download-Image -Uri $node.ImageUrl -TargetPath $targetPath
-    $imageMap[$node.Name] = "images/$fileName"
+    $relativePath = "images/$fileName"
+    $baseImageCache[$baseKey] = $relativePath
+    $imageMap[$nodeKey] = $relativePath
 }
 
 $mermaid = Build-Mermaid -Root $root -ImageMap $imageMap
@@ -430,7 +522,7 @@ $null = $markdown.AppendLine('## Synthesis')
 $null = $markdown.AppendLine()
 $null = $markdown.AppendLine($mermaid)
 
-$outputFile = Join-Path -Path (Resolve-Path $OutputDirectory) -ChildPath ("$(Sanitize-Id $MonsterName).md")
+$outputFile = Join-Path -Path $outputRoot -ChildPath ("$(Sanitize-Id $MonsterName).md")
 if ((Test-Path $outputFile) -and (-not $Overwrite)) {
     throw "File '$outputFile' already exists. Use -Overwrite to replace."
 }
@@ -438,4 +530,4 @@ $markdown.ToString() | Set-Content -Path $outputFile -Encoding utf8
 
 Write-Host "Created markdown: $outputFile"
 # Example usage:
-# .\Dqm3-GenerateMonsterTree.ps1 -MonsterName "Slime Knight" -OutputDirectory ".\output" -Overwrite
+# .\Generate-MonsterMarkdown.ps1 -MonsterName "Slime Knight" -OutputDirectory ".\output" -Overwrite
