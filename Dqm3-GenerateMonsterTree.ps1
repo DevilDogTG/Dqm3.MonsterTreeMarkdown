@@ -171,16 +171,31 @@ $FamilyRankDefaults = @{
 }
 
 function Get-FamilyRank {
-    param([string]$Name)
+    param(
+        [string]$Name,
+        [string]$RequestedRank,
+        [string]$ParentSource
+    )
 
     if (-not $Name) { return '' }
 
     $normalized = Sanitize-Id $Name
-    if ($FamilyRankDefaults.ContainsKey($normalized)) {
-        return $FamilyRankDefaults[$normalized]
+    if (-not $FamilyRankDefaults.ContainsKey($normalized)) { return '' }
+
+    if ($ParentSource -and $ParentSource -ne 'Normal') {
+        return 'Any'
     }
 
-    return ''
+    if ($RequestedRank) {
+        $candidate = $RequestedRank.Trim()
+        if ($candidate) {
+            $upper = $candidate.ToUpperInvariant()
+            if ($upper -eq 'ANY') { return 'Any' }
+            if ($upper -match '^[A-Z+]{1,3}$') { return $upper }
+        }
+    }
+
+    return $FamilyRankDefaults[$normalized]
 }
 
 function Get-FamilyImagePath {
@@ -213,13 +228,15 @@ function New-SynthesisNode {
         [object[]]$Children,
         [string]$Source,
         [hashtable]$DuplicateCounts,
+        [string]$RequiredRank = '',
+        [string]$ParentSource = '',
         [switch]$IsDuplicate
     )
 
     $name = if ($LookupNode) { $LookupNode.name } else { $FallbackName }
     $rank = if ($LookupNode) { $LookupNode.rank } else { '' }
     if (-not $rank) {
-        $familyRank = Get-FamilyRank -Name $name
+        $familyRank = Get-FamilyRank -Name $name -RequestedRank $RequiredRank -ParentSource $ParentSource
         if ($familyRank) { $rank = $familyRank }
     }
     $imageUrl = if ($LookupNode) { $LookupNode.imageUrl } else { '' }
@@ -269,7 +286,9 @@ function Build-SynthesisTree {
         [hashtable]$Lookup,
         [string]$Name,
         [System.Collections.Generic.HashSet[string]]$Visited,
-        [hashtable]$DuplicateCounts
+        [hashtable]$DuplicateCounts,
+        [string]$RequiredParentRank = '',
+        [string]$ParentSource = ''
     )
 
     $node = if ($Lookup.ContainsKey($Name)) { $Lookup[$Name] } else { $null }
@@ -296,18 +315,19 @@ function Build-SynthesisTree {
     }
 
     if ($Visited.Contains($Name)) {
-        return New-SynthesisNode -LookupNode $node -FallbackName $Name -Children @() -Source $source -DuplicateCounts $DuplicateCounts -IsDuplicate
+        return New-SynthesisNode -LookupNode $node -FallbackName $Name -Children @() -Source $source -DuplicateCounts $DuplicateCounts -RequiredRank $RequiredParentRank -ParentSource $ParentSource -IsDuplicate
     }
 
     $Visited.Add($Name) | Out-Null
 
     $children = @()
+    $nextRequiredRank = if ($node) { $node.rank } else { '' }
     foreach ($childName in $childrenNames | Where-Object { $_ -and $_.Trim() -ne '' }) {
-        $childTree = Build-SynthesisTree -Lookup $Lookup -Name $childName.Trim() -Visited $Visited -DuplicateCounts $DuplicateCounts
+        $childTree = Build-SynthesisTree -Lookup $Lookup -Name $childName.Trim() -Visited $Visited -DuplicateCounts $DuplicateCounts -RequiredParentRank $nextRequiredRank -ParentSource $source
         if ($childTree) { $children += $childTree }
     }
 
-    return New-SynthesisNode -LookupNode $node -FallbackName $Name -Children $children -Source $source -DuplicateCounts $DuplicateCounts
+    return New-SynthesisNode -LookupNode $node -FallbackName $Name -Children $children -Source $source -DuplicateCounts $DuplicateCounts -RequiredRank $RequiredParentRank -ParentSource $ParentSource
 }
 
 
