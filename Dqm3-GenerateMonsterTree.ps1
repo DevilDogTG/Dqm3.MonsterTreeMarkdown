@@ -438,4 +438,4 @@ $markdown.ToString() | Set-Content -Path $outputFile -Encoding utf8
 
 Write-Host "Created markdown: $outputFile"
 # Example usage:
-# .\Dqm3-GenerateMonsterMarkdown.ps1 -MonsterName "Slime Knight" -OutputDirectory ".\output" -Overwrite
+# .\Dqm3-GenerateMonsterTree.ps1 -MonsterName "Slime Knight" -OutputDirectory ".\output" -Overwrite
