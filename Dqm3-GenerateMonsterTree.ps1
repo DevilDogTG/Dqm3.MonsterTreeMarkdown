@@ -221,6 +221,39 @@ function Get-FamilyImagePath {
     return $null
 }
 
+function Test-MonsterCanScout {
+    param($LookupNode)
+
+    if (-not $LookupNode) { return $false }
+
+    $properties = $LookupNode.PSObject.Properties.Name
+    if (-not ($properties -contains 'isScout')) { return $false }
+
+    $rawValue = [string]$LookupNode.isScout
+    if (-not $rawValue) { return $false }
+
+    $normalized = $rawValue.Trim()
+    if (-not $normalized) { return $false }
+
+    $circleTokens = @([string][char]0x25CB, [string][char]0x25EF, [string][char]0x3007)
+    if ($circleTokens -contains $normalized) { return $true }
+
+    $positiveTokens = @('?', 'O', 'o', 'Yes', 'Y', 'True', '1', 'Scout', 'Available')
+    if ($positiveTokens -contains $normalized) { return $true }
+
+    $lower = $normalized.ToLowerInvariant()
+    switch ($lower) {
+        'yes' { return $true }
+        'y' { return $true }
+        'true' { return $true }
+        '1' { return $true }
+        'scout' { return $true }
+        'available' { return $true }
+    }
+
+    return $false
+}
+
 function New-SynthesisNode {
     param(
         $LookupNode,
@@ -264,6 +297,7 @@ function New-SynthesisNode {
 
     $localImage = Get-FamilyImagePath -Name $name
     $effectiveSource = if ($Source) { $Source } else { 'Leaf' }
+    $canScout = Test-MonsterCanScout -LookupNode $LookupNode
 
     return [pscustomobject]@{
         Name = $name
@@ -272,6 +306,7 @@ function New-SynthesisNode {
         LocalImage = $localImage
         Children = $nodeChildren
         Source = $effectiveSource
+        CanScout = $canScout
         MonsterId = $baseKey
         NodeKey = $nodeKey
         BaseNodeKey = $baseKey
@@ -444,6 +479,7 @@ function Build-Mermaid {
     $nodeData = @{}
     $edgeTuples = [System.Collections.Generic.List[object]]::new()
     $edgeKeys = [System.Collections.Generic.HashSet[string]]::new()
+    $classAssignments = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]::new()
 
     $queue.Enqueue($Root)
 
@@ -460,16 +496,39 @@ function Build-Mermaid {
             Image = $img
         }
 
+        $baseKey = $node.BaseNodeKey
+        $isFamily = $false
+        if ($baseKey -and $baseKey -like '*-family') { $isFamily = $true }
+
+        if (-not $isFamily) {
+            $className = $null
+            if ($node.CanScout) {
+                $className = 'scout'
+            } elseif ($node.IsDuplicate) {
+                $className = 'duplicated'
+            } elseif ($node.NodeKey -eq $Root.NodeKey) {
+                $className = 'current'
+            }
+
+            if ($className) {
+                if (-not $classAssignments.ContainsKey($className)) {
+                    $classAssignments[$className] = [System.Collections.Generic.HashSet[string]]::new()
+                }
+                $classAssignments[$className].Add($nodeId) | Out-Null
+            }
+        }
+
         foreach ($child in $node.Children) {
             $queue.Enqueue($child)
 
             $childId = Sanitize-Id $child.NodeKey
-            $childLabel = "$($child.Name) ($($child.Rank))"
-            $childImg = if ($ImageMap.ContainsKey($child.NodeKey)) { "<img src=`"$($ImageMap[$child.NodeKey])`" />" } else { '' }
-
-            $nodeData[$childId] = [pscustomobject]@{
-                Label = $childLabel
-                Image = $childImg
+            if (-not $nodeData.ContainsKey($childId)) {
+                $childLabel = "$($child.Name) ($($child.Rank))"
+                $childImg = if ($ImageMap.ContainsKey($child.NodeKey)) { "<img src=`"$($ImageMap[$child.NodeKey])`" />" } else { '' }
+                $nodeData[$childId] = [pscustomobject]@{
+                    Label = $childLabel
+                    Image = $childImg
+                }
             }
 
             $edgeKey = "$childId|$nodeId"
@@ -481,8 +540,19 @@ function Build-Mermaid {
 
     $sortedNodeIds = $nodeData.Keys | Sort-Object
     foreach ($nodeId in $sortedNodeIds) {
-        $nodeEntry = $nodeData[$nodeId]
-        $null = $sb.AppendLine(('    {0}["{1}"{2}]' -f $nodeId, $nodeEntry.Label, $nodeEntry.Image))
+        $entry = $nodeData[$nodeId]
+        $null = $sb.AppendLine(('    {0}["{1}"{2}]' -f $nodeId, $entry.Label, $entry.Image))
+    }
+
+    if ($classAssignments.Count -gt 0) {
+        $null = $sb.AppendLine()
+        foreach ($className in @('scout', 'duplicated', 'current')) {
+            if (-not $classAssignments.ContainsKey($className)) { continue }
+            $nodeList = @($classAssignments[$className] | Sort-Object)
+            if ($nodeList.Count -eq 0) { continue }
+            $joined = [string]::Join(',', $nodeList)
+            $null = $sb.AppendLine("    class $joined $className;")
+        }
     }
 
     $sortedEdges = $edgeTuples | Sort-Object -Property From, To
@@ -580,3 +650,4 @@ $markdown.ToString() | Set-Content -Path $outputFile -Encoding utf8
 Write-Host "Created markdown: $outputFile"
 # Example usage:
 # .\Generate-MonsterMarkdown.ps1 -MonsterName "Slime Knight" -OutputDirectory ".\output" -Overwrite
+
