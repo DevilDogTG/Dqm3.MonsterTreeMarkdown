@@ -1,4 +1,4 @@
-# Dqm3.MonsterTreeMarkdown
+# Dragon Quest Monster: The Dark Prince - Monster tree generator
 
 A PowerShell utility that turns Game8's Dragon Quest Monsters 3 synthesis data into shareable Markdown. Feed it a monster name and it builds a mermaid-powered family tree, complete with portrait downloads, so you can visualize how to scout or fuse toward that monster.
 
