@@ -254,6 +254,71 @@ function Test-MonsterCanScout {
     return $false
 }
 
+function Format-ScoutLocation {
+    param(
+        [string]$Field,
+        [string]$Season,
+        [string]$Weather
+    )
+
+    $segments = @()
+
+    if ($Field) {
+        $fieldValue = $Field.Trim()
+        if ($fieldValue) { $segments += $fieldValue }
+    }
+
+    if ($Season) {
+        $seasonValue = $Season.Trim()
+        if ($seasonValue) { $segments += $seasonValue }
+    }
+
+    if ($Weather) {
+        $weatherValue = $Weather.Trim()
+        if ($weatherValue) { $segments += $weatherValue }
+    }
+
+    if ($segments.Count -eq 0) { return $null }
+
+    return ($segments -join '-')
+}
+
+function Get-ScoutEntries {
+    param($Nodes)
+
+    if (-not $Nodes) { return @() }
+
+    $entries = [System.Collections.Generic.Dictionary[string, object]]::new()
+
+    foreach ($node in $Nodes) {
+        if (-not $node) { continue }
+        if (-not $node.CanScout) { continue }
+        if ($node.IsDuplicate) { continue }
+        if (-not $node.BaseNodeKey) { continue }
+        if ($node.BaseNodeKey -like '*-family') { continue }
+
+        $baseKey = $node.BaseNodeKey
+        if (-not $entries.ContainsKey($baseKey)) {
+            $locations = [System.Collections.Generic.HashSet[string]]::new()
+            $name = if ($node.Name) { $node.Name } else { $baseKey }
+            $rank = if ($node.Rank) { $node.Rank } else { '' }
+            $sortKey = if ($node.Name) { $node.Name.ToLowerInvariant() } else { $baseKey }
+            $entries[$baseKey] = [pscustomobject]@{
+                Name = $name
+                Rank = $rank
+                Locations = $locations
+                SortKey = $sortKey
+            }
+        }
+
+        $location = Format-ScoutLocation -Field $node.Field -Season $node.Season -Weather $node.Weather
+        if ($location) {
+            $entries[$baseKey].Locations.Add($location) | Out-Null
+        }
+    }
+
+    return $entries.Values | Sort-Object -Property SortKey, Name
+}
 function New-SynthesisNode {
     param(
         $LookupNode,
@@ -307,6 +372,9 @@ function New-SynthesisNode {
         Children = $nodeChildren
         Source = $effectiveSource
         CanScout = $canScout
+        Field = if ($LookupNode) { $LookupNode.field } else { '' }
+        Season = if ($LookupNode) { $LookupNode.season } else { '' }
+        Weather = if ($LookupNode) { $LookupNode.weather } else { '' }
         MonsterId = $baseKey
         NodeKey = $nodeKey
         BaseNodeKey = $baseKey
@@ -586,6 +654,7 @@ $visited = [System.Collections.Generic.HashSet[string]]::new()
 $duplicateCounts = @{}
 $root = Build-SynthesisTree -Lookup $lookup -Name $MonsterName -Visited $visited -DuplicateCounts $duplicateCounts
 $nodes = Flatten-Nodes -Root $root
+$scoutEntries = @(Get-ScoutEntries -Nodes $nodes)
 
 Ensure-Directory -Path $OutputDirectory
 $outputRoot = (Resolve-Path -Path $OutputDirectory).Path
@@ -640,6 +709,27 @@ if ($overview) {
 $null = $markdown.AppendLine('## Synthesis')
 $null = $markdown.AppendLine()
 $null = $markdown.AppendLine($mermaid)
+if ($scoutEntries.Count -gt 0) {
+    $null = $markdown.AppendLine()
+    $null = $markdown.AppendLine('## Scout locations')
+    $null = $markdown.AppendLine()
+
+    foreach ($entry in $scoutEntries) {
+        $rankSuffix = if ($entry.Rank) { " ($($entry.Rank))" } else { '' }
+        $null = $markdown.AppendLine("- **$($entry.Name)$rankSuffix**")
+
+        $locations = @($entry.Locations | Sort-Object)
+        if ($locations.Count -gt 0) {
+            foreach ($location in $locations) {
+                $null = $markdown.AppendLine("  - $location")
+            }
+        } else {
+            $null = $markdown.AppendLine('  - Location details unavailable')
+        }
+
+        $null = $markdown.AppendLine()
+    }
+}
 
 $outputFile = Join-Path -Path $outputRoot -ChildPath ("$(Sanitize-Id $MonsterName).md")
 if ((Test-Path $outputFile) -and (-not $Overwrite)) {
@@ -650,4 +740,3 @@ $markdown.ToString() | Set-Content -Path $outputFile -Encoding utf8
 Write-Host "Created markdown: $outputFile"
 # Example usage:
 # .\Generate-MonsterMarkdown.ps1 -MonsterName "Slime Knight" -OutputDirectory ".\output" -Overwrite
-
