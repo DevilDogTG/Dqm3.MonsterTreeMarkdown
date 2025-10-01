@@ -2,9 +2,6 @@
 
 A PowerShell utility that turns Game8's Dragon Quest Monsters 3 synthesis data into shareable Markdown. Feed it a monster name and it builds a mermaid-powered family tree, complete with portrait downloads, so you can visualize how to scout or fuse toward that monster.
 
-**Example output**
-![Example](assets/example.png)
-
 ## Highlights
 
 - Pulls the official Game8 structural mapping dataset for Dark Prince monsters.
@@ -12,6 +9,10 @@ A PowerShell utility that turns Game8's Dragon Quest Monsters 3 synthesis data i
 - Builds a mermaid `graph LR` diagram describing every parent combination leading to the requested monster.
 - Writes a ready-to-publish Markdown file alongside an `images/` folder of cached artwork.
 - Caches third-party packages and JSON data locally for faster repeat runs.
+
+## Example Output
+
+![Example](assets/example.png)
 
 ## Prerequisites
 
