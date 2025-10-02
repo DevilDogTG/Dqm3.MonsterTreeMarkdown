@@ -65,6 +65,165 @@ function Get-HtmlDocument {
     return $doc
 }
 
+$script:MetalKidLocationsDataset = $null
+
+function Convert-JsAssignmentToJson {
+    param(
+        [string]$RawValue,
+        [string]$VariableName
+    )
+
+    if (-not $RawValue) { return '[]' }
+
+    $trimmed = $RawValue.Trim()
+    $prefix = "window.$VariableName="
+    if ($trimmed.StartsWith($prefix)) {
+        $trimmed = $trimmed.Substring($prefix.Length)
+    }
+
+    if ($trimmed.EndsWith(';')) {
+        $trimmed = $trimmed.Substring(0, $trimmed.Length - 1)
+    }
+
+    $pattern = '(?<=[{,])\s*([a-zA-Z0-9_]+)\s*:'
+    $converted = [System.Text.RegularExpressions.Regex]::Replace(
+        $trimmed,
+        $pattern,
+        { param($match) '"' + $match.Groups[1].Value + '":' }
+    )
+
+    return $converted
+}
+
+function Get-MetalKidJsonPayload {
+    param(
+        [string]$Uri,
+        [string]$VariableName,
+        [string]$CacheFile,
+        [switch]$ForceRefresh
+    )
+
+    $cacheRoot = Join-Path -Path $PSScriptRoot -ChildPath '.cache'
+    if (-not (Test-Path $cacheRoot)) {
+        New-Item -ItemType Directory -Path $cacheRoot | Out-Null
+    }
+    $cachePath = Join-Path -Path $cacheRoot -ChildPath $CacheFile
+
+    if ((-not $ForceRefresh) -and (Test-Path $cachePath)) {
+        return Get-Content -Path $cachePath -Raw
+    }
+
+    $headers = @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+    try {
+        $response = Invoke-WebRequest -Uri $Uri -Headers $headers -UseBasicParsing -ErrorAction Stop
+        $raw = $response.Content
+    } catch {
+        if (Test-Path $cachePath) {
+            return Get-Content -Path $cachePath -Raw
+        }
+        return '[]'
+    }
+
+    $json = Convert-JsAssignmentToJson -RawValue $raw -VariableName $VariableName
+    Set-Content -Path $cachePath -Value $json -Encoding utf8
+    return $json
+}
+
+function Get-MetalKidLocationsDataset {
+    param(
+        [switch]$ForceRefresh
+    )
+
+    if ((-not $ForceRefresh) -and $script:MetalKidLocationsDataset) {
+        return $script:MetalKidLocationsDataset
+    }
+
+    $locationsJson = Get-MetalKidJsonPayload -Uri 'https://dev.metalkid.info/api/v1/DQM3/Locations/Data' -VariableName 'locationsData' -CacheFile 'metalkid_locations.json' -ForceRefresh:$ForceRefresh
+    $monstersJson = Get-MetalKidJsonPayload -Uri 'https://dev.metalkid.info/api/v1/DQM3/Lookup/Monsters' -VariableName 'monstersLookup' -CacheFile 'metalkid_monsters.json' -ForceRefresh:$ForceRefresh
+
+    $locations = if ($locationsJson) { $locationsJson | ConvertFrom-Json } else { @() }
+    $monsters = if ($monstersJson) { $monstersJson | ConvertFrom-Json } else { @() }
+    if (-not $locations) { $locations = @() }
+    if (-not $monsters) { $monsters = @() }
+
+    foreach ($location in $locations) {
+        $monsterIds = @()
+        if ($location.m) {
+            $monsterIds = $location.m -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | ForEach-Object { [int]$_ }
+        }
+
+        if ($location.PSObject.Properties.Name -notcontains 'MonsterIds') {
+            $location | Add-Member -NotePropertyName MonsterIds -NotePropertyValue $monsterIds
+        } else {
+            $location.MonsterIds = $monsterIds
+        }
+    }
+
+    $nameToId = New-Object 'System.Collections.Generic.Dictionary[string,int]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($monster in $monsters) {
+        $name = $monster.n
+        if (-not $name) { continue }
+
+        if (-not $nameToId.ContainsKey($name)) {
+            $nameToId[$name] = [int]$monster.id
+        }
+
+        $sanitized = Sanitize-Id $name
+        if ($sanitized -and (-not $nameToId.ContainsKey($sanitized))) {
+            $nameToId[$sanitized] = [int]$monster.id
+        }
+    }
+
+    $dataset = [pscustomobject]@{
+        Locations = $locations
+        Monsters = $monsters
+        MonsterNameToId = $nameToId
+    }
+
+    $script:MetalKidLocationsDataset = $dataset
+    return $dataset
+}
+
+function Get-MetalKidMonsterLocations {
+    param(
+        [string]$MonsterName
+    )
+
+    if (-not $MonsterName) { return @() }
+
+    $dataset = Get-MetalKidLocationsDataset
+    if (-not $dataset) { return @() }
+
+    $candidates = New-Object 'System.Collections.Generic.HashSet[int]'
+    $trimmed = $MonsterName.Trim()
+    if ($trimmed) {
+        if ($dataset.MonsterNameToId.ContainsKey($trimmed)) {
+            $null = $candidates.Add([int]$dataset.MonsterNameToId[$trimmed])
+        }
+
+        $sanitized = Sanitize-Id $trimmed
+        if ($sanitized -and $dataset.MonsterNameToId.ContainsKey($sanitized)) {
+            $null = $candidates.Add([int]$dataset.MonsterNameToId[$sanitized])
+        }
+    }
+
+    if ($candidates.Count -eq 0) { return @() }
+
+    $results = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($location in $dataset.Locations) {
+        if (-not $location.MonsterIds) { continue }
+        foreach ($candidate in $candidates) {
+            if ($location.MonsterIds -contains $candidate) {
+                $name = if ($location.n) { $location.n.Trim() } else { '' }
+                if ($name) { $results.Add($name) | Out-Null }
+                break
+            }
+        }
+    }
+
+    return @($results | Sort-Object)
+}
+
 function Get-MappingDataset {
     param(
         [switch]$ForceRefresh
@@ -221,6 +380,125 @@ function Get-FamilyImagePath {
     return $null
 }
 
+function Test-MonsterCanScout {
+    param($LookupNode)
+
+    if (-not $LookupNode) { return $false }
+
+    $properties = $LookupNode.PSObject.Properties.Name
+    if (-not ($properties -contains 'isScout')) { return $false }
+
+    $rawValue = [string]$LookupNode.isScout
+    if (-not $rawValue) { return $false }
+
+    $normalized = $rawValue.Trim()
+    if (-not $normalized) { return $false }
+
+    $circleTokens = @([string][char]0x25CB, [string][char]0x25EF, [string][char]0x3007)
+    if ($circleTokens -contains $normalized) { return $true }
+
+    $positiveTokens = @('?', 'O', 'o', 'Yes', 'Y', 'True', '1', 'Scout', 'Available')
+    if ($positiveTokens -contains $normalized) { return $true }
+
+    $lower = $normalized.ToLowerInvariant()
+    switch ($lower) {
+        'yes' { return $true }
+        'y' { return $true }
+        'true' { return $true }
+        '1' { return $true }
+        'scout' { return $true }
+        'available' { return $true }
+    }
+
+    return $false
+}
+
+function Format-ScoutLocation {
+    param(
+        [string]$Field,
+        [string]$Season,
+        [string]$Weather
+    )
+
+    $segments = @()
+
+    if ($Field) {
+        $fieldValue = $Field.Trim()
+        if ($fieldValue) { $segments += $fieldValue }
+    }
+
+    if ($Season) {
+        $seasonValue = $Season.Trim()
+        if ($seasonValue) { $segments += $seasonValue }
+    }
+
+    if ($Weather) {
+        $weatherValue = $Weather.Trim()
+        if ($weatherValue) { $segments += $weatherValue }
+    }
+
+    if ($segments.Count -eq 0) { return $null }
+
+    return ($segments -join '-')
+}
+
+function Get-ScoutEntries {
+    param($Nodes)
+
+    if (-not $Nodes) { return @() }
+
+    $entries = [System.Collections.Generic.Dictionary[string, object]]::new()
+
+    foreach ($node in $Nodes) {
+        if (-not $node) { continue }
+        if (-not $node.CanScout) { continue }
+        if ($node.IsDuplicate) { continue }
+        if (-not $node.BaseNodeKey) { continue }
+        if ($node.BaseNodeKey -like '*-family') { continue }
+
+        $baseKey = $node.BaseNodeKey
+        if (-not $entries.ContainsKey($baseKey)) {
+            $locations = [System.Collections.Generic.HashSet[string]]::new()
+            $fallbackLocations = [System.Collections.Generic.HashSet[string]]::new()
+            $name = if ($node.Name) { $node.Name } else { $baseKey }
+            $rank = if ($node.Rank) { $node.Rank } else { '' }
+            $sortKey = if ($node.Name) { $node.Name.ToLowerInvariant() } else { $baseKey }
+            $entries[$baseKey] = [pscustomobject]@{
+                Name = $name
+                Rank = $rank
+                Locations = $locations
+                FallbackLocations = $fallbackLocations
+                SortKey = $sortKey
+            }
+        }
+
+        $location = Format-ScoutLocation -Field $node.Field -Season $node.Season -Weather $node.Weather
+        if ($location) {
+            $entries[$baseKey].FallbackLocations.Add($location) | Out-Null
+        }
+    }
+
+    foreach ($entry in $entries.Values) {
+        $matchedLocations = @(Get-MetalKidMonsterLocations -MonsterName $entry.Name)
+        if ($matchedLocations.Count -eq 0 -and $entry.FallbackLocations) {
+            $matchedLocations = @($entry.FallbackLocations)
+        }
+
+        $entry.Locations.Clear()
+        foreach ($loc in ($matchedLocations | Where-Object { $_ } | Sort-Object -Unique)) {
+            $trimmed = $loc.Trim()
+            if ($trimmed) {
+                $entry.Locations.Add($trimmed) | Out-Null
+            }
+        }
+
+        if ($entry.PSObject.Properties.Name -contains 'FallbackLocations') {
+            $entry.PSObject.Properties.Remove('FallbackLocations') | Out-Null
+        }
+    }
+
+    return $entries.Values | Sort-Object -Property SortKey, Name
+}
 function New-SynthesisNode {
     param(
         $LookupNode,
@@ -264,6 +542,7 @@ function New-SynthesisNode {
 
     $localImage = Get-FamilyImagePath -Name $name
     $effectiveSource = if ($Source) { $Source } else { 'Leaf' }
+    $canScout = Test-MonsterCanScout -LookupNode $LookupNode
 
     return [pscustomobject]@{
         Name = $name
@@ -272,6 +551,10 @@ function New-SynthesisNode {
         LocalImage = $localImage
         Children = $nodeChildren
         Source = $effectiveSource
+        CanScout = $canScout
+        Field = if ($LookupNode) { $LookupNode.field } else { '' }
+        Season = if ($LookupNode) { $LookupNode.season } else { '' }
+        Weather = if ($LookupNode) { $LookupNode.weather } else { '' }
         MonsterId = $baseKey
         NodeKey = $nodeKey
         BaseNodeKey = $baseKey
@@ -444,6 +727,7 @@ function Build-Mermaid {
     $nodeData = @{}
     $edgeTuples = [System.Collections.Generic.List[object]]::new()
     $edgeKeys = [System.Collections.Generic.HashSet[string]]::new()
+    $classAssignments = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]::new()
 
     $queue.Enqueue($Root)
 
@@ -460,16 +744,39 @@ function Build-Mermaid {
             Image = $img
         }
 
+        $baseKey = $node.BaseNodeKey
+        $isFamily = $false
+        if ($baseKey -and $baseKey -like '*-family') { $isFamily = $true }
+
+        if (-not $isFamily) {
+            $className = $null
+            if ($node.CanScout) {
+                $className = 'scout'
+            } elseif ($node.IsDuplicate) {
+                $className = 'duplicated'
+            } elseif ($node.NodeKey -eq $Root.NodeKey) {
+                $className = 'current'
+            }
+
+            if ($className) {
+                if (-not $classAssignments.ContainsKey($className)) {
+                    $classAssignments[$className] = [System.Collections.Generic.HashSet[string]]::new()
+                }
+                $classAssignments[$className].Add($nodeId) | Out-Null
+            }
+        }
+
         foreach ($child in $node.Children) {
             $queue.Enqueue($child)
 
             $childId = Sanitize-Id $child.NodeKey
-            $childLabel = "$($child.Name) ($($child.Rank))"
-            $childImg = if ($ImageMap.ContainsKey($child.NodeKey)) { "<img src=`"$($ImageMap[$child.NodeKey])`" />" } else { '' }
-
-            $nodeData[$childId] = [pscustomobject]@{
-                Label = $childLabel
-                Image = $childImg
+            if (-not $nodeData.ContainsKey($childId)) {
+                $childLabel = "$($child.Name) ($($child.Rank))"
+                $childImg = if ($ImageMap.ContainsKey($child.NodeKey)) { "<img src=`"$($ImageMap[$child.NodeKey])`" />" } else { '' }
+                $nodeData[$childId] = [pscustomobject]@{
+                    Label = $childLabel
+                    Image = $childImg
+                }
             }
 
             $edgeKey = "$childId|$nodeId"
@@ -481,8 +788,19 @@ function Build-Mermaid {
 
     $sortedNodeIds = $nodeData.Keys | Sort-Object
     foreach ($nodeId in $sortedNodeIds) {
-        $nodeEntry = $nodeData[$nodeId]
-        $null = $sb.AppendLine(('    {0}["{1}"{2}]' -f $nodeId, $nodeEntry.Label, $nodeEntry.Image))
+        $entry = $nodeData[$nodeId]
+        $null = $sb.AppendLine(('    {0}["{1}"{2}]' -f $nodeId, $entry.Label, $entry.Image))
+    }
+
+    if ($classAssignments.Count -gt 0) {
+        $null = $sb.AppendLine()
+        foreach ($className in @('scout', 'duplicated', 'current')) {
+            if (-not $classAssignments.ContainsKey($className)) { continue }
+            $nodeList = @($classAssignments[$className] | Sort-Object)
+            if ($nodeList.Count -eq 0) { continue }
+            $joined = [string]::Join(',', $nodeList)
+            $null = $sb.AppendLine("    class $joined $className;")
+        }
     }
 
     $sortedEdges = $edgeTuples | Sort-Object -Property From, To
@@ -516,6 +834,7 @@ $visited = [System.Collections.Generic.HashSet[string]]::new()
 $duplicateCounts = @{}
 $root = Build-SynthesisTree -Lookup $lookup -Name $MonsterName -Visited $visited -DuplicateCounts $duplicateCounts
 $nodes = Flatten-Nodes -Root $root
+$scoutEntries = @(Get-ScoutEntries -Nodes $nodes)
 
 Ensure-Directory -Path $OutputDirectory
 $outputRoot = (Resolve-Path -Path $OutputDirectory).Path
@@ -570,6 +889,27 @@ if ($overview) {
 $null = $markdown.AppendLine('## Synthesis')
 $null = $markdown.AppendLine()
 $null = $markdown.AppendLine($mermaid)
+if ($scoutEntries.Count -gt 0) {
+    $null = $markdown.AppendLine()
+    $null = $markdown.AppendLine('## Scout locations')
+    $null = $markdown.AppendLine()
+
+    foreach ($entry in $scoutEntries) {
+        $rankSuffix = if ($entry.Rank) { " ($($entry.Rank))" } else { '' }
+        $null = $markdown.AppendLine("- **$($entry.Name)$rankSuffix**")
+
+        $locations = @($entry.Locations | Sort-Object)
+        if ($locations.Count -gt 0) {
+            foreach ($location in $locations) {
+                $null = $markdown.AppendLine("  - $location")
+            }
+        } else {
+            $null = $markdown.AppendLine('  - Location details unavailable')
+        }
+
+        $null = $markdown.AppendLine()
+    }
+}
 
 $outputFile = Join-Path -Path $outputRoot -ChildPath ("$(Sanitize-Id $MonsterName).md")
 if ((Test-Path $outputFile) -and (-not $Overwrite)) {
@@ -580,3 +920,6 @@ $markdown.ToString() | Set-Content -Path $outputFile -Encoding utf8
 Write-Host "Created markdown: $outputFile"
 # Example usage:
 # .\Generate-MonsterMarkdown.ps1 -MonsterName "Slime Knight" -OutputDirectory ".\output" -Overwrite
+
+
+
