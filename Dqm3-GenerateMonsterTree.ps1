@@ -65,6 +65,165 @@ function Get-HtmlDocument {
     return $doc
 }
 
+$script:MetalKidLocationsDataset = $null
+
+function Convert-JsAssignmentToJson {
+    param(
+        [string]$RawValue,
+        [string]$VariableName
+    )
+
+    if (-not $RawValue) { return '[]' }
+
+    $trimmed = $RawValue.Trim()
+    $prefix = "window.$VariableName="
+    if ($trimmed.StartsWith($prefix)) {
+        $trimmed = $trimmed.Substring($prefix.Length)
+    }
+
+    if ($trimmed.EndsWith(';')) {
+        $trimmed = $trimmed.Substring(0, $trimmed.Length - 1)
+    }
+
+    $pattern = '(?<=[{,])\s*([a-zA-Z0-9_]+)\s*:'
+    $converted = [System.Text.RegularExpressions.Regex]::Replace(
+        $trimmed,
+        $pattern,
+        { param($match) '"' + $match.Groups[1].Value + '":' }
+    )
+
+    return $converted
+}
+
+function Get-MetalKidJsonPayload {
+    param(
+        [string]$Uri,
+        [string]$VariableName,
+        [string]$CacheFile,
+        [switch]$ForceRefresh
+    )
+
+    $cacheRoot = Join-Path -Path $PSScriptRoot -ChildPath '.cache'
+    if (-not (Test-Path $cacheRoot)) {
+        New-Item -ItemType Directory -Path $cacheRoot | Out-Null
+    }
+    $cachePath = Join-Path -Path $cacheRoot -ChildPath $CacheFile
+
+    if ((-not $ForceRefresh) -and (Test-Path $cachePath)) {
+        return Get-Content -Path $cachePath -Raw
+    }
+
+    $headers = @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+    try {
+        $response = Invoke-WebRequest -Uri $Uri -Headers $headers -UseBasicParsing -ErrorAction Stop
+        $raw = $response.Content
+    } catch {
+        if (Test-Path $cachePath) {
+            return Get-Content -Path $cachePath -Raw
+        }
+        return '[]'
+    }
+
+    $json = Convert-JsAssignmentToJson -RawValue $raw -VariableName $VariableName
+    Set-Content -Path $cachePath -Value $json -Encoding utf8
+    return $json
+}
+
+function Get-MetalKidLocationsDataset {
+    param(
+        [switch]$ForceRefresh
+    )
+
+    if ((-not $ForceRefresh) -and $script:MetalKidLocationsDataset) {
+        return $script:MetalKidLocationsDataset
+    }
+
+    $locationsJson = Get-MetalKidJsonPayload -Uri 'https://dev.metalkid.info/api/v1/DQM3/Locations/Data' -VariableName 'locationsData' -CacheFile 'metalkid_locations.json' -ForceRefresh:$ForceRefresh
+    $monstersJson = Get-MetalKidJsonPayload -Uri 'https://dev.metalkid.info/api/v1/DQM3/Lookup/Monsters' -VariableName 'monstersLookup' -CacheFile 'metalkid_monsters.json' -ForceRefresh:$ForceRefresh
+
+    $locations = if ($locationsJson) { $locationsJson | ConvertFrom-Json } else { @() }
+    $monsters = if ($monstersJson) { $monstersJson | ConvertFrom-Json } else { @() }
+    if (-not $locations) { $locations = @() }
+    if (-not $monsters) { $monsters = @() }
+
+    foreach ($location in $locations) {
+        $monsterIds = @()
+        if ($location.m) {
+            $monsterIds = $location.m -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | ForEach-Object { [int]$_ }
+        }
+
+        if ($location.PSObject.Properties.Name -notcontains 'MonsterIds') {
+            $location | Add-Member -NotePropertyName MonsterIds -NotePropertyValue $monsterIds
+        } else {
+            $location.MonsterIds = $monsterIds
+        }
+    }
+
+    $nameToId = New-Object 'System.Collections.Generic.Dictionary[string,int]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($monster in $monsters) {
+        $name = $monster.n
+        if (-not $name) { continue }
+
+        if (-not $nameToId.ContainsKey($name)) {
+            $nameToId[$name] = [int]$monster.id
+        }
+
+        $sanitized = Sanitize-Id $name
+        if ($sanitized -and (-not $nameToId.ContainsKey($sanitized))) {
+            $nameToId[$sanitized] = [int]$monster.id
+        }
+    }
+
+    $dataset = [pscustomobject]@{
+        Locations = $locations
+        Monsters = $monsters
+        MonsterNameToId = $nameToId
+    }
+
+    $script:MetalKidLocationsDataset = $dataset
+    return $dataset
+}
+
+function Get-MetalKidMonsterLocations {
+    param(
+        [string]$MonsterName
+    )
+
+    if (-not $MonsterName) { return @() }
+
+    $dataset = Get-MetalKidLocationsDataset
+    if (-not $dataset) { return @() }
+
+    $candidates = New-Object 'System.Collections.Generic.HashSet[int]'
+    $trimmed = $MonsterName.Trim()
+    if ($trimmed) {
+        if ($dataset.MonsterNameToId.ContainsKey($trimmed)) {
+            $null = $candidates.Add([int]$dataset.MonsterNameToId[$trimmed])
+        }
+
+        $sanitized = Sanitize-Id $trimmed
+        if ($sanitized -and $dataset.MonsterNameToId.ContainsKey($sanitized)) {
+            $null = $candidates.Add([int]$dataset.MonsterNameToId[$sanitized])
+        }
+    }
+
+    if ($candidates.Count -eq 0) { return @() }
+
+    $results = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($location in $dataset.Locations) {
+        if (-not $location.MonsterIds) { continue }
+        foreach ($candidate in $candidates) {
+            if ($location.MonsterIds -contains $candidate) {
+                $name = if ($location.n) { $location.n.Trim() } else { '' }
+                if ($name) { $results.Add($name) | Out-Null }
+                break
+            }
+        }
+    }
+
+    return @($results | Sort-Object)
+}
+
 function Get-MappingDataset {
     param(
         [switch]$ForceRefresh
@@ -300,6 +459,7 @@ function Get-ScoutEntries {
         $baseKey = $node.BaseNodeKey
         if (-not $entries.ContainsKey($baseKey)) {
             $locations = [System.Collections.Generic.HashSet[string]]::new()
+            $fallbackLocations = [System.Collections.Generic.HashSet[string]]::new()
             $name = if ($node.Name) { $node.Name } else { $baseKey }
             $rank = if ($node.Rank) { $node.Rank } else { '' }
             $sortKey = if ($node.Name) { $node.Name.ToLowerInvariant() } else { $baseKey }
@@ -307,13 +467,33 @@ function Get-ScoutEntries {
                 Name = $name
                 Rank = $rank
                 Locations = $locations
+                FallbackLocations = $fallbackLocations
                 SortKey = $sortKey
             }
         }
 
         $location = Format-ScoutLocation -Field $node.Field -Season $node.Season -Weather $node.Weather
         if ($location) {
-            $entries[$baseKey].Locations.Add($location) | Out-Null
+            $entries[$baseKey].FallbackLocations.Add($location) | Out-Null
+        }
+    }
+
+    foreach ($entry in $entries.Values) {
+        $matchedLocations = @(Get-MetalKidMonsterLocations -MonsterName $entry.Name)
+        if ($matchedLocations.Count -eq 0 -and $entry.FallbackLocations) {
+            $matchedLocations = @($entry.FallbackLocations)
+        }
+
+        $entry.Locations.Clear()
+        foreach ($loc in ($matchedLocations | Where-Object { $_ } | Sort-Object -Unique)) {
+            $trimmed = $loc.Trim()
+            if ($trimmed) {
+                $entry.Locations.Add($trimmed) | Out-Null
+            }
+        }
+
+        if ($entry.PSObject.Properties.Name -contains 'FallbackLocations') {
+            $entry.PSObject.Properties.Remove('FallbackLocations') | Out-Null
         }
     }
 
@@ -740,3 +920,6 @@ $markdown.ToString() | Set-Content -Path $outputFile -Encoding utf8
 Write-Host "Created markdown: $outputFile"
 # Example usage:
 # .\Generate-MonsterMarkdown.ps1 -MonsterName "Slime Knight" -OutputDirectory ".\output" -Overwrite
+
+
+
