@@ -14,6 +14,51 @@ A PowerShell utility that turns Game8's Dragon Quest Monsters 3 synthesis data a
 
 ![Example](assets/example.png)
 
+## Flowchart
+
+```mermaid
+flowchart TD
+    start(Start)
+    args[/Parameters: MonsterName<br/>OutputDirectory<br/>Overwrite/]
+    deps[Ensure dependencies<br/>Resolve-ModulePath and load HtmlAgilityPack/System assemblies]
+    mapping[Get-MappingDataset<br/>Download or reuse .cache JSON from Game8]
+    lookup[Build name to monster lookup table]
+    check{Monster in lookup?}
+    abort[[Throw error and stop]]
+    detail[Get-HtmlDocument<br/>Fetch monster detail page]
+    overview[Get-MonsterOverview<br/>Extract number, family, rank, image link]
+    tree[Build-SynthesisTree<br/>Follow special/quad/normal parents<br/>Tag duplicates and infer ranks]
+    flatten[Flatten-Nodes<br/>Breadth-first list of unique nodes]
+    prepare[Ensure output and images directories<br/>Copy bundled assets]
+    images[Build image map<br/>Reuse family art or download to 96x96 JPEG]
+    mermaidStep[Build-Mermaid<br/>Assemble nodes, edges, and class styling]
+    markdown[Compose markdown<br/>Title, stats, mermaid graph, scout list]
+    write[Set-Content using sanitized filename<br/>Respect Overwrite switch]
+    done[[Write-Host Created markdown]]
+    stop(Stop)
+
+    start --> args
+    args --> deps --> mapping --> lookup --> check
+    check -->|No| abort
+    check -->|Yes| detail --> overview
+    check -->|Yes| tree --> flatten
+
+    subgraph MetalKid Data
+        metalkid[Get-MetalKidLocationsDataset<br/>Fetch and cache location/monster payloads]
+        scouts[Get-ScoutEntries<br/>Match nodes to locations and format output]
+        metalkid --> scouts
+    end
+
+    flatten --> scouts
+    args --> prepare
+    flatten --> prepare --> images --> mermaidStep
+    flatten --> images
+    overview --> markdown
+    scouts --> markdown
+    mermaidStep --> markdown --> write --> done
+    done --> stop
+```
+
 ## Prerequisites
 
 - PowerShell 7+ (Windows PowerShell 5.1 also works but 7+ is recommended).
