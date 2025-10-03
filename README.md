@@ -18,6 +18,7 @@ A PowerShell utility that turns Game8's Dragon Quest Monsters 3 synthesis data a
 
 ```mermaid
 flowchart TD
+    start(Start)
     args[/Parameters: MonsterName<br/>OutputDirectory<br/>Overwrite/]
     deps[Ensure dependencies<br/>Resolve-ModulePath and load HtmlAgilityPack/System assemblies]
     mapping[Get-MappingDataset<br/>Download or reuse .cache JSON from Game8]
@@ -34,7 +35,9 @@ flowchart TD
     markdown[Compose markdown<br/>Title, stats, mermaid graph, scout list]
     write[Set-Content using sanitized filename<br/>Respect Overwrite switch]
     done[[Write-Host Created markdown]]
+    stop(Stop)
 
+    start --> args
     args --> deps --> mapping --> lookup --> check
     check -->|No| abort
     check -->|Yes| detail --> overview
@@ -53,6 +56,7 @@ flowchart TD
     overview --> markdown
     scouts --> markdown
     mermaidStep --> markdown --> write --> done
+    done --> stop
 ```
 
 ## Prerequisites
